@@ -411,7 +411,14 @@ func (b *Builder) SetValidateMixins(to bool) {
 
 // Save saves the builder
 func (b *Builder) Save(logger logging.Logger, creatorMetadata CreatorMetadata) error {
-	logger.Debugf("Creating builder with the following buildpacks:")
+	logger.Debugf("Creating builder with the following...")
+	if b.metadata.Extensions != nil && len(b.metadata.Extensions) > 0 {
+		logger.Debugf("Extensions:")
+		for _, xtnInfo := range b.metadata.Extensions {
+			logger.Debugf("-> %s", style.Symbol(xtnInfo.FullName()))
+		}
+	}
+	logger.Debugf("Buildpacks:")
 	for _, bpInfo := range b.metadata.Buildpacks {
 		logger.Debugf("-> %s", style.Symbol(bpInfo.FullName()))
 	}
