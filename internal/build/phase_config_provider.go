@@ -244,6 +244,13 @@ func WithRoot() PhaseConfigProviderOperation {
 	}
 }
 
+//explictly set a user to run as.
+func WithUser(user string) PhaseConfigProviderOperation {
+	return func(provider *PhaseConfigProvider) {
+		provider.ctrConf.User = user
+	}
+}
+
 func WithContainerOperations(operations ...ContainerOperation) PhaseConfigProviderOperation {
 	return func(provider *PhaseConfigProvider) {
 		provider.containerOps = append(provider.containerOps, operations...)

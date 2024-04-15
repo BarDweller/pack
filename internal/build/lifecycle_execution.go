@@ -375,6 +375,8 @@ func (l *LifecycleExecution) Create(ctx context.Context, buildCache, launchCache
 	opts := []PhaseConfigProviderOperation{
 		WithFlags(l.withLogLevel(flags...)...),
 		WithArgs(l.opts.Image.String()),
+		//explicitly set the user to run as.
+		WithUser(fmt.Sprintf("%d:%d",l.opts.Builder.UID(), l.opts.Builder.GID())),
 		WithNetwork(l.opts.Network),
 		cacheBindOp,
 		WithContainerOperations(WriteProjectMetadata(l.mountPaths.projectPath(), l.opts.ProjectMetadata, l.os)),
@@ -434,6 +436,8 @@ func (l *LifecycleExecution) Detect(ctx context.Context, phaseFactory PhaseFacto
 		WithArgs(
 			l.withLogLevel()...,
 		),
+		//explicitly set the user to run as
+		WithUser(fmt.Sprintf("%d:%d",l.opts.Builder.UID(), l.opts.Builder.GID())),
 		WithNetwork(l.opts.Network),
 		WithBinds(l.opts.Volumes...),
 		WithContainerOperations(
@@ -527,9 +531,13 @@ func (l *LifecycleExecution) Restore(ctx context.Context, buildCache Cache, kani
 		"restorer",
 		l,
 		WithLogPrefix("restorer"),
-		WithImage(l.opts.LifecycleImage),
+		//use build image, because build image has pre-existing mountpoints
+		//this allows for volumes to mount with correct ownership&perms.
+		//WithImage(l.opts.LifecycleImage),
 		WithEnv(fmt.Sprintf("%s=%d", builder.EnvUID, l.opts.Builder.UID()), fmt.Sprintf("%s=%d", builder.EnvGID, l.opts.Builder.GID())),
-		WithRoot(), // remove after platform API 0.2 is no longer supported
+		// Don't use root.. I guess we could allow it for 0.2 only.
+		//WithRoot(), // remove after platform API 0.2 is no longer supported
+		WithUser(fmt.Sprintf("%d:%d",l.opts.Builder.UID(), l.opts.Builder.GID())),
 		WithArgs(
 			l.withLogLevel()...,
 		),
@@ -578,12 +586,18 @@ func (l *LifecycleExecution) Analyze(ctx context.Context, buildCache, launchCach
 		}
 	}
 
+	//ensure gid flag is always set with appropriate value.
 	if l.opts.GID >= overrideGID {
 		flags = append(flags, "-gid", strconv.Itoa(l.opts.GID))
+	}else{
+		flags = append(flags, "-gid",  strconv.Itoa(l.opts.Builder.GID()))
 	}
 
+	//ensure uid flag is always set with appropriate value.
 	if l.opts.UID >= overrideUID {
 		flags = append(flags, "-uid", strconv.Itoa(l.opts.UID))
+	}else{
+		flags = append(flags, "-uid",  strconv.Itoa(l.opts.Builder.UID()))
 	}
 
 	if l.opts.PreviousImage != "" {
@@ -650,10 +664,14 @@ func (l *LifecycleExecution) Analyze(ctx context.Context, buildCache, launchCach
 			"analyzer",
 			l,
 			WithLogPrefix("analyzer"),
-			WithImage(l.opts.LifecycleImage),
+			//Don't use lifecycle image, it doesn't have the mountpoints 
+			//owned by the correct user, or with the correct permissions
+			//WithImage(l.opts.LifecycleImage),
 			WithEnv(fmt.Sprintf("%s=%d", builder.EnvUID, l.opts.Builder.UID()), fmt.Sprintf("%s=%d", builder.EnvGID, l.opts.Builder.GID())),
 			WithRegistryAccess(authConfig),
-			WithRoot(),
+			//Don't run as root
+			//WithRoot(),
+			WithUser(fmt.Sprintf("%d",l.opts.Builder.UID())),
 			WithArgs(l.withLogLevel(args...)...),
 			WithNetwork(l.opts.Network),
 			flagsOp,
@@ -669,7 +687,9 @@ func (l *LifecycleExecution) Analyze(ctx context.Context, buildCache, launchCach
 			"analyzer",
 			l,
 			WithLogPrefix("analyzer"),
-			WithImage(l.opts.LifecycleImage),
+			//Don't use lifecycle image, it doesn't have the mountpoints 
+			//owned by the correct user, or with the correct permissions
+			//WithImage(l.opts.LifecycleImage),
 			WithEnv(
 				fmt.Sprintf("%s=%d", builder.EnvUID, l.opts.Builder.UID()),
 				fmt.Sprintf("%s=%d", builder.EnvGID, l.opts.Builder.GID()),
@@ -677,6 +697,9 @@ func (l *LifecycleExecution) Analyze(ctx context.Context, buildCache, launchCach
 			WithDaemonAccess(l.opts.DockerHost),
 			launchCacheBindOp,
 			WithFlags(l.withLogLevel("-daemon")...),
+			//Don't run as root
+			//WithRoot(),
+			WithUser(fmt.Sprintf("%d",l.opts.Builder.UID())),
 			WithArgs(args...),
 			flagsOp,
 			WithNetwork(l.opts.Network),
@@ -699,6 +722,8 @@ func (l *LifecycleExecution) Build(ctx context.Context, phaseFactory PhaseFactor
 		l,
 		WithLogPrefix("builder"),
 		WithArgs(l.withLogLevel()...),
+		//explicity set the user to run as.
+		WithUser(fmt.Sprintf("%d:%d",l.opts.Builder.UID(), l.opts.Builder.GID())),		
 		WithNetwork(l.opts.Network),
 		WithBinds(l.opts.Volumes...),
 		WithFlags(flags...),
@@ -721,6 +746,7 @@ func (l *LifecycleExecution) ExtendBuild(ctx context.Context, kanikoCache Cache,
 		WithEnv("CNB_EXPERIMENTAL_MODE=warn"),
 		WithFlags(flags...),
 		WithNetwork(l.opts.Network),
+		//this step requires root. 
 		WithRoot(),
 		WithBinds(fmt.Sprintf("%s:%s", kanikoCache.Name(), l.mountPaths.kanikoCacheDir())),
 	)
@@ -742,6 +768,7 @@ func (l *LifecycleExecution) ExtendRun(ctx context.Context, kanikoCache Cache, p
 		WithEnv("CNB_EXPERIMENTAL_MODE=warn"),
 		WithFlags(flags...),
 		WithNetwork(l.opts.Network),
+		//this step requires root
 		WithRoot(),
 		WithImage(runImageName),
 		WithBinds(fmt.Sprintf("%s:%s", kanikoCache.Name(), l.mountPaths.kanikoCacheDir())),
@@ -810,7 +837,9 @@ func (l *LifecycleExecution) Export(ctx context.Context, buildCache, launchCache
 
 	opts := []PhaseConfigProviderOperation{
 		WithLogPrefix("exporter"),
-		WithImage(l.opts.LifecycleImage),
+		//don't use the lifecycle image, it doesn't have the volume mountpoints
+		//so volume permissions & ownerships are incorrect.
+		//WithImage(l.opts.LifecycleImage),
 		WithEnv(
 			fmt.Sprintf("%s=%d", builder.EnvUID, l.opts.Builder.UID()),
 			fmt.Sprintf("%s=%d", builder.EnvGID, l.opts.Builder.GID()),
@@ -819,7 +848,9 @@ func (l *LifecycleExecution) Export(ctx context.Context, buildCache, launchCache
 			l.withLogLevel(flags...)...,
 		),
 		WithArgs(append([]string{l.opts.Image.String()}, l.opts.AdditionalTags...)...),
-		WithRoot(),
+		//Don't use root
+		//WithRoot(),
+		WithUser(fmt.Sprintf("%s:%s",l.opts.Builder.UID(), l.opts.Builder.GID())),
 		WithNetwork(l.opts.Network),
 		cacheBindOp,
 		kanikoCacheBindOp,
