@@ -5,8 +5,6 @@ import (
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 
-	"github.com/buildpacks/pack/internal/docker"
-
 	"github.com/buildpacks/pack/buildpackage"
 	builderwriter "github.com/buildpacks/pack/internal/builder/writer"
 	"github.com/buildpacks/pack/internal/commands"
@@ -45,15 +43,16 @@ func NewPackCommand(logger ConfigurableLogger) (*cobra.Command, error) {
 		Short: "CLI for building apps using Cloud Native Buildpacks",
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			if fs := cmd.Flags(); fs != nil {
-				if flag, err := fs.GetBool("no-color"); err == nil && flag {
-					color.Disable(flag)
-				}
+				if forceColor, err := fs.GetBool("force-color"); err == nil && !forceColor {
+					if flag, err := fs.GetBool("no-color"); err == nil && flag {
+						color.Disable(flag)
+					}
 
-				_, canDisplayColor := term.IsTerminal(logging.GetWriterForLevel(logger, logging.InfoLevel))
-				if !canDisplayColor {
-					color.Disable(true)
+					_, canDisplayColor := term.IsTerminal(logging.GetWriterForLevel(logger, logging.InfoLevel))
+					if !canDisplayColor {
+						color.Disable(true)
+					}
 				}
-
 				if flag, err := fs.GetBool("quiet"); err == nil {
 					logger.WantQuiet(flag)
 				}
@@ -68,6 +67,7 @@ func NewPackCommand(logger ConfigurableLogger) (*cobra.Command, error) {
 	}
 
 	rootCmd.PersistentFlags().Bool("no-color", false, "Disable color output")
+	rootCmd.PersistentFlags().Bool("force-color", false, "Force color output")
 	rootCmd.PersistentFlags().Bool("timestamps", false, "Enable timestamps in output")
 	rootCmd.PersistentFlags().BoolP("quiet", "q", false, "Show less output")
 	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "Show more output")
@@ -137,7 +137,7 @@ func initConfig() (config.Config, string, error) {
 }
 
 func initClient(logger logging.Logger, cfg config.Config) (*client.Client, error) {
-	if err := docker.ProcessDockerContext(logger); err != nil {
+	if err := client.ProcessDockerContext(logger); err != nil {
 		return nil, err
 	}
 

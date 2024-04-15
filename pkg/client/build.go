@@ -1,18 +1,20 @@
 package client
 
 import (
+	"archive/tar"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/buildpacks/pack/buildpackage"
 
 	"github.com/Masterminds/semver"
 	"github.com/buildpacks/imgutil"
@@ -26,6 +28,7 @@ import (
 	"github.com/pkg/errors"
 	ignore "github.com/sabhiram/go-gitignore"
 
+	"github.com/buildpacks/pack/buildpackage"
 	"github.com/buildpacks/pack/internal/build"
 	"github.com/buildpacks/pack/internal/builder"
 	internalConfig "github.com/buildpacks/pack/internal/config"
@@ -46,9 +49,10 @@ import (
 )
 
 const (
-	minLifecycleVersionSupportingCreator = "0.7.4"
-	prevLifecycleVersionSupportingImage  = "0.6.1"
-	minLifecycleVersionSupportingImage   = "0.7.5"
+	minLifecycleVersionSupportingCreator               = "0.7.4"
+	prevLifecycleVersionSupportingImage                = "0.6.1"
+	minLifecycleVersionSupportingImage                 = "0.7.5"
+	minLifecycleVersionSupportingCreatorWithExtensions = "0.19.0"
 )
 
 // LifecycleExecutor executes the lifecycle which satisfies the Cloud Native Buildpacks Lifecycle specification.
@@ -182,6 +186,9 @@ type BuildOptions struct {
 	// User's group id used to build the image
 	GroupID int
 
+	// User's user id used to build the image
+	UserID int
+
 	// A previous image to set to a particular tag reference, digest reference, or (when performing a daemon build) image ID;
 	PreviousImage string
 
@@ -267,9 +274,9 @@ type layoutPathConfig struct {
 	targetRunImagePath      string
 }
 
-var IsSuggestedBuilderFunc = func(b string) bool {
-	for _, suggestedBuilder := range builder.SuggestedBuilders {
-		if b == suggestedBuilder.Image {
+var IsTrustedBuilderFunc = func(b string) bool {
+	for _, knownBuilder := range builder.KnownBuilders {
+		if b == knownBuilder.Image && knownBuilder.Trusted {
 			return true
 		}
 	}
@@ -333,7 +340,7 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 		return errors.Wrapf(err, "invalid builder %s", style.Symbol(opts.Builder))
 	}
 
-	runImageName := c.resolveRunImage(opts.RunImage, imgRegistry, builderRef.Context().RegistryStr(), bldr.DefaultRunImage(), opts.AdditionalMirrors, opts.Publish)
+	runImageName := c.resolveRunImage(opts.RunImage, imgRegistry, builderRef.Context().RegistryStr(), bldr.DefaultRunImage(), opts.AdditionalMirrors, opts.Publish, c.accessChecker)
 
 	fetchOptions := image.FetchOptions{
 		Daemon:     !opts.Publish,
@@ -377,7 +384,7 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 
 	// Default mode: if the TrustBuilder option is not set, trust the suggested builders.
 	if opts.TrustBuilder == nil {
-		opts.TrustBuilder = IsSuggestedBuilderFunc
+		opts.TrustBuilder = IsTrustedBuilderFunc
 	}
 
 	// Ensure the builder's platform APIs are supported
@@ -453,7 +460,7 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 		buildEnvs[k] = v
 	}
 
-	ephemeralBuilder, err := c.createEphemeralBuilder(rawBuilderImage, buildEnvs, order, fetchedBPs, orderExtensions, fetchedExs, usingPlatformAPI.LessThan("0.12"))
+	ephemeralBuilder, err := c.createEphemeralBuilder(rawBuilderImage, buildEnvs, order, fetchedBPs, orderExtensions, fetchedExs, usingPlatformAPI.LessThan("0.12"), opts.RunImage)
 	if err != nil {
 		return err
 	}
@@ -509,44 +516,41 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 		}
 	}
 
-	fetchRunImage := func(name string) error {
-		_, err := c.imageFetcher.Fetch(ctx, name, fetchOptions)
-		return err
-	}
 	lifecycleOpts := build.LifecycleOptions{
-		AppPath:              appPath,
-		Image:                imageRef,
-		Builder:              ephemeralBuilder,
-		BuilderImage:         builderRef.Name(),
-		LifecycleImage:       ephemeralBuilder.Name(),
-		RunImage:             runImageName,
-		FetchRunImage:        fetchRunImage,
-		ProjectMetadata:      projectMetadata,
-		ClearCache:           opts.ClearCache,
-		Publish:              opts.Publish,
-		TrustBuilder:         opts.TrustBuilder(opts.Builder),
-		UseCreator:           useCreator,
-		DockerHost:           opts.DockerHost,
-		Cache:                opts.Cache,
-		CacheImage:           opts.CacheImage,
-		HTTPProxy:            proxyConfig.HTTPProxy,
-		HTTPSProxy:           proxyConfig.HTTPSProxy,
-		NoProxy:              proxyConfig.NoProxy,
-		Network:              opts.ContainerConfig.Network,
-		AdditionalTags:       opts.AdditionalTags,
-		Volumes:              processedVolumes,
-		DefaultProcessType:   opts.DefaultProcessType,
-		FileFilter:           fileFilter,
-		Workspace:            opts.Workspace,
-		GID:                  opts.GroupID,
-		PreviousImage:        opts.PreviousImage,
-		Interactive:          opts.Interactive,
-		Termui:               termui.NewTermui(imageName, ephemeralBuilder, runImageName),
-		ReportDestinationDir: opts.ReportDestinationDir,
-		SBOMDestinationDir:   opts.SBOMDestinationDir,
-		CreationTime:         opts.CreationTime,
-		Layout:               opts.Layout(),
-		Keychain:             c.keychain,
+		AppPath:                  appPath,
+		Image:                    imageRef,
+		Builder:                  ephemeralBuilder,
+		BuilderImage:             builderRef.Name(),
+		LifecycleImage:           ephemeralBuilder.Name(),
+		RunImage:                 runImageName,
+		ProjectMetadata:          projectMetadata,
+		ClearCache:               opts.ClearCache,
+		Publish:                  opts.Publish,
+		TrustBuilder:             opts.TrustBuilder(opts.Builder),
+		UseCreator:               useCreator,
+		UseCreatorWithExtensions: supportsCreatorWithExtensions(lifecycleVersion),
+		DockerHost:               opts.DockerHost,
+		Cache:                    opts.Cache,
+		CacheImage:               opts.CacheImage,
+		HTTPProxy:                proxyConfig.HTTPProxy,
+		HTTPSProxy:               proxyConfig.HTTPSProxy,
+		NoProxy:                  proxyConfig.NoProxy,
+		Network:                  opts.ContainerConfig.Network,
+		AdditionalTags:           opts.AdditionalTags,
+		Volumes:                  processedVolumes,
+		DefaultProcessType:       opts.DefaultProcessType,
+		FileFilter:               fileFilter,
+		Workspace:                opts.Workspace,
+		GID:                      opts.GroupID,
+		UID:                      opts.UserID,
+		PreviousImage:            opts.PreviousImage,
+		Interactive:              opts.Interactive,
+		Termui:                   termui.NewTermui(imageName, ephemeralBuilder, runImageName),
+		ReportDestinationDir:     opts.ReportDestinationDir,
+		SBOMDestinationDir:       opts.SBOMDestinationDir,
+		CreationTime:             opts.CreationTime,
+		Layout:                   opts.Layout(),
+		Keychain:                 c.keychain,
 	}
 
 	switch {
@@ -557,6 +561,140 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) error {
 		lifecycleOpts.LifecycleApis = lifecycleAPIs
 	case !opts.TrustBuilder(opts.Builder):
 		return errors.Errorf("Lifecycle %s does not have an associated lifecycle image. Builder must be trusted.", lifecycleVersion.String())
+	}
+
+	lifecycleOpts.FetchRunImageWithLifecycleLayer = func(runImageName string) (string, error) {
+		ephemeralRunImageName := fmt.Sprintf("pack.local/run-image/%x:latest", randString(10))
+		runImage, err := c.imageFetcher.Fetch(ctx, runImageName, fetchOptions)
+		if err != nil {
+			return "", err
+		}
+		ephemeralRunImage, err := local.NewImage(ephemeralRunImageName, c.docker, local.FromBaseImage(runImage.Name()))
+		if err != nil {
+			return "", err
+		}
+		tmpDir, err := os.MkdirTemp("", "extend-run-image-scratch") // we need to write to disk because manifest.json is last in the tar
+		if err != nil {
+			return "", err
+		}
+		defer os.RemoveAll(tmpDir)
+		lifecycleImageTar, err := func() (string, error) {
+			lifecycleImageTar := filepath.Join(tmpDir, "lifecycle-image.tar")
+			lifecycleImageReader, err := c.docker.ImageSave(context.Background(), []string{lifecycleOpts.LifecycleImage}) // this is fast because the lifecycle image is based on distroless static
+			if err != nil {
+				return "", err
+			}
+			defer lifecycleImageReader.Close()
+			lifecycleImageWriter, err := os.Create(lifecycleImageTar)
+			if err != nil {
+				return "", err
+			}
+			defer lifecycleImageWriter.Close()
+			if _, err = io.Copy(lifecycleImageWriter, lifecycleImageReader); err != nil {
+				return "", err
+			}
+			return lifecycleImageTar, nil
+		}()
+		if err != nil {
+			return "", err
+		}
+		advanceTarToEntryWithName := func(tarReader *tar.Reader, wantName string) (*tar.Header, error) {
+			var (
+				header *tar.Header
+				err    error
+			)
+			for {
+				header, err = tarReader.Next()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					return nil, err
+				}
+				if header.Name != wantName {
+					continue
+				}
+				return header, nil
+			}
+			return nil, fmt.Errorf("failed to find header with name: %s", wantName)
+		}
+		lifecycleLayerName, err := func() (string, error) {
+			lifecycleImageReader, err := os.Open(lifecycleImageTar)
+			if err != nil {
+				return "", err
+			}
+			defer lifecycleImageReader.Close()
+			tarReader := tar.NewReader(lifecycleImageReader)
+			if _, err = advanceTarToEntryWithName(tarReader, "manifest.json"); err != nil {
+				return "", err
+			}
+			type descriptor struct {
+				Layers []string
+			}
+			type manifestJSON []descriptor
+			var manifestContents manifestJSON
+			if err = json.NewDecoder(tarReader).Decode(&manifestContents); err != nil {
+				return "", err
+			}
+			if len(manifestContents) < 1 {
+				return "", errors.New("missing manifest entries")
+			}
+			return manifestContents[0].Layers[len(manifestContents[0].Layers)-1], nil // we can assume the lifecycle layer is the last in the tar
+		}()
+		if err != nil {
+			return "", err
+		}
+		if lifecycleLayerName == "" {
+			return "", errors.New("failed to find lifecycle layer")
+		}
+		lifecycleLayerTar, err := func() (string, error) {
+			lifecycleImageReader, err := os.Open(lifecycleImageTar)
+			if err != nil {
+				return "", err
+			}
+			defer lifecycleImageReader.Close()
+			tarReader := tar.NewReader(lifecycleImageReader)
+			var header *tar.Header
+			if header, err = advanceTarToEntryWithName(tarReader, lifecycleLayerName); err != nil {
+				return "", err
+			}
+			lifecycleLayerTar := filepath.Join(filepath.Dir(lifecycleImageTar), filepath.Dir(lifecycleLayerName)+".tar")
+			lifecycleLayerWriter, err := os.OpenFile(lifecycleLayerTar, os.O_CREATE|os.O_RDWR, os.FileMode(header.Mode))
+			if err != nil {
+				return "", err
+			}
+			defer lifecycleLayerWriter.Close()
+			if _, err = io.Copy(lifecycleLayerWriter, tarReader); err != nil {
+				return "", err
+			}
+			return lifecycleLayerTar, nil
+		}()
+		if err != nil {
+			return "", err
+		}
+		diffID, err := func() (string, error) {
+			lifecycleLayerReader, err := os.Open(lifecycleLayerTar)
+			if err != nil {
+				return "", err
+			}
+			defer lifecycleLayerReader.Close()
+			hasher := sha256.New()
+			if _, err = io.Copy(hasher, lifecycleLayerReader); err != nil {
+				return "", err
+			}
+			// it's weird that this doesn't match lifecycleLayerTar
+			return hex.EncodeToString(hasher.Sum(nil)), nil
+		}()
+		if err != nil {
+			return "", err
+		}
+		if err = ephemeralRunImage.AddLayerWithDiffID(lifecycleLayerTar, "sha256:"+diffID); err != nil {
+			return "", err
+		}
+		if err = ephemeralRunImage.Save(); err != nil {
+			return "", err
+		}
+		return ephemeralRunImageName, nil
 	}
 
 	if err = c.lifecycleExecutor.Execute(ctx, lifecycleOpts); err != nil {
@@ -606,6 +744,10 @@ func supportsCreator(lifecycleVersion *builder.Version) bool {
 	// Technically the creator is supported as of platform API version 0.3 (lifecycle version 0.7.0+) but earlier versions
 	// have bugs that make using the creator problematic.
 	return !lifecycleVersion.LessThan(semver.MustParse(minLifecycleVersionSupportingCreator))
+}
+
+func supportsCreatorWithExtensions(lifecycleVersion *builder.Version) bool {
+	return !lifecycleVersion.LessThan(semver.MustParse(minLifecycleVersionSupportingCreatorWithExtensions))
 }
 
 func supportsLifecycleImage(lifecycleVersion *builder.Version) bool {
@@ -1186,9 +1328,10 @@ func (c *Client) createEphemeralBuilder(
 	orderExtensions dist.Order,
 	extensions []buildpack.BuildModule,
 	validateMixins bool,
+	runImage string,
 ) (*builder.Builder, error) {
 	origBuilderName := rawBuilderImage.Name()
-	bldr, err := builder.New(rawBuilderImage, fmt.Sprintf("pack.local/builder/%x:latest", randString(10)))
+	bldr, err := builder.New(rawBuilderImage, fmt.Sprintf("pack.local/builder/%x:latest", randString(10)), builder.WithRunImage(runImage))
 	if err != nil {
 		return nil, errors.Wrapf(err, "invalid builder %s", style.Symbol(origBuilderName))
 	}

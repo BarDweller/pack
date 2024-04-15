@@ -235,6 +235,9 @@ const (
 	ForceRebase
 	BuildpackFlatten
 	MetaBuildpackFolder
+	PlatformRetries
+	FlattenBuilderCreationV2
+	FixesRunImageMetadata
 )
 
 var featureTests = map[Feature]func(i *PackInvoker) bool{
@@ -261,6 +264,15 @@ var featureTests = map[Feature]func(i *PackInvoker) bool{
 	},
 	MetaBuildpackFolder: func(i *PackInvoker) bool {
 		return i.atLeast("v0.30.0")
+	},
+	PlatformRetries: func(i *PackInvoker) bool {
+		return i.atLeast("v0.32.1")
+	},
+	FlattenBuilderCreationV2: func(i *PackInvoker) bool {
+		return i.atLeast("v0.33.1")
+	},
+	FixesRunImageMetadata: func(i *PackInvoker) bool {
+		return i.atLeast("v0.34.0")
 	},
 }
 

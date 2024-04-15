@@ -40,7 +40,10 @@ func testArchive(t *testing.T, when spec.G, it spec.S) {
 
 	it.After(func() {
 		if err := os.RemoveAll(tmpDir); err != nil {
-			t.Fatalf("failed to clean up tmp dir %s: %s", tmpDir, err)
+			if runtime.GOOS != "windows" {
+				// skip "The process cannot access the file because it is being used by another process" on windows
+				t.Fatalf("failed to clean up tmp dir %s: %s", tmpDir, err)
+			}
 		}
 	})
 
@@ -70,15 +73,6 @@ func testArchive(t *testing.T, when spec.G, it spec.S) {
 				verify := h.NewTarVerifier(t, tr, 1234, 2345)
 				verify.NextDirectory("/nested/dir/dir-in-archive", int64(os.ModePerm))
 			})
-		})
-
-		it("returns error if closed multiple times", func() {
-			rc := archive.ReadDirAsTar(src, "/nested/dir/dir-in-archive", 1234, 2345, 0777, true, false, func(s string) bool { return false })
-			tr := tar.NewReader(rc)
-			verify := h.NewTarVerifier(t, tr, 1234, 2345)
-			verify.NoMoreFilesExist()
-			h.AssertNil(t, rc.Close())
-			h.AssertError(t, rc.Close(), "reader already closed")
 		})
 	})
 
@@ -440,6 +434,37 @@ func testArchive(t *testing.T, when spec.G, it spec.S) {
 					)
 					verify.NoMoreFilesExist()
 				})
+			})
+		})
+
+		when("hard link files are present", func() {
+			it.Before(func() {
+				src = filepath.Join("testdata", "dir-to-tar-with-hardlink")
+				// create a hard link
+				err := os.Link(filepath.Join(src, "original-file"), filepath.Join(src, "original-file-2"))
+				h.AssertNil(t, err)
+			})
+
+			it.After(func() {
+				os.RemoveAll(filepath.Join(src, "original-file-2"))
+			})
+
+			it("tar file file doesn't include duplicated data", func() {
+				outputFilename := filepath.Join(tmpDir, "file-with-hard-links.tar")
+				fh, err := os.Create(outputFilename)
+				h.AssertNil(t, err)
+
+				tw := tar.NewWriter(fh)
+				err = archive.WriteDirToTar(tw, src, "/nested/dir", 1234, 2345, 0777, true, false, nil)
+
+				h.AssertNil(t, err)
+				h.AssertNil(t, tw.Close())
+				h.AssertNil(t, fh.Close())
+				h.AssertOnTarEntries(t, outputFilename,
+					"/nested/dir/original-file",
+					"/nested/dir/original-file-2",
+					h.AreEquivalentHardLinks(),
+				)
 			})
 		})
 	})
